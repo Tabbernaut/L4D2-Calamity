@@ -254,7 +254,8 @@ public OnMapStart()
             iBonusShow[x] = 0;
         }
         // remember normal distance for this map
-        iDistance = LGO_GetMapValueInt( "max_distance", iDistance );
+        new mapscore = LGO_GetMapValueInt( "max_distance" );
+        iDistance = ((mapscore >= 0) && (mapscore <= 9999)) ? mapscore : L4D_GetVersusMaxCompletionScore();
 
         // remember whether team A is roundhalf 0 survivor
         bTeamAFirst = !L4D2_AreTeamsFlipped();
