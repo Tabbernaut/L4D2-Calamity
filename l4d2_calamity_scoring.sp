@@ -10,7 +10,7 @@
 #include <confogl>
 #define REQUIRE_PLUGIN
 
-#define PLUGIN_VERSION              "0.5"
+#define PLUGIN_VERSION              "0.5.1"
 
 #define STR_MAX_CLASSNAME           64
 #define TEAM_SURVIVOR               2
@@ -92,6 +92,9 @@ new        bool:                    bDT3                            = false;    
 new        bool:                    bDT3Started                     = false;                                            // event started for this round?
 new        Float:                   fDT3StartTime;                                                                      // when the DT3 event was started
 new        Float:                   fDT3SurvivorLasted[MAXPLAYERS+1];                                                   // per survivor: the time they lasted before dying during the event
+
+new        bool:                    bCheckWipeDone                  = false;
+new        bool:                    bCheckWipeTankDone              = false;
 
 // SDK-Stuff
 new                                 iOffset_Incapacitated           = 0;                                                // used to check if tank is dying
@@ -254,8 +257,7 @@ public OnMapStart()
             iBonusShow[x] = 0;
         }
         // remember normal distance for this map
-        new mapscore = LGO_GetMapValueInt( "max_distance" );
-        iDistance = ((mapscore >= 0) && (mapscore <= 9999)) ? mapscore : L4D_GetVersusMaxCompletionScore();
+        iDistance = LGO_GetMapValueInt( "max_distance", iDistance );
 
         // remember whether team A is roundhalf 0 survivor
         bTeamAFirst = !L4D2_AreTeamsFlipped();
@@ -279,7 +281,9 @@ public Action:Event_RoundStart(Handle:event, const String:name[], bool:dontBroad
     bWitchGotKill = false;
     bTankSpawned = false;
     bRushProtection = false;
-    iTankClient = 0;
+    bCheckWipeDone = false;
+    bCheckWipeTankDone = false;
+    iTankClient = 0;    
 
     if ( bDT3 )
     {
@@ -303,18 +307,46 @@ public Action:Event_RoundStart(Handle:event, const String:name[], bool:dontBroad
     }
 }
 
+// penalty_bonus: requesting final update before setting score, pass it the holdout bonus
+public PBONUS_RequestFinalUpdate( &update )
+{
+    if ( bDT3Started && !bCheckWipeDone )
+    {
+        update += CheckWipe();
+    }
+    
+    if ( !bCheckWipeTankDone )
+    {
+        update += CheckTankWipeBonus();
+    }
+    
+    return update;
+}
+
+// this is not called before penalty_bonus, so useless
+public Action:L4D2_OnEndVersusModeRound(bool:countSurvivors)
+{
+    if ( bDT3Started && !bCheckWipeDone )
+    {
+        CheckWipe();
+    }
+    
+    // just in case this happens before the scores are written (never in testing)
+    if ( !bCheckWipeTankDone )
+    {
+        CheckTankWipeBonus();
+    }
+}
+
 public Action:Event_RoundEnd(Handle:event, const String:name[], bool:dontBroadcast)
 {
-    if (bInRound)
+    if ( bInRound )
     {
         // do stuff when the round is done "the first time"
         bInRound = false;
 
         // if rushprotection was enabled (and thus it was a wipe), reset distance points
         L4D_SetVersusMaxCompletionScore(iDistance);
-
-        // just in case this happens before the scores are written (never in testing)
-        CheckTankWipeBonus();
 
         new Handle: pack;
         decl String: buffer[MAX_MESSAGE_LENGTH];
@@ -334,8 +366,6 @@ public Action:Event_PlayerHang(Handle:event, const String:name[], bool:dontBroad
     {
         CheckRushProtection();
     }
-    
-    CheckWipe();
 }
 
 public Action:Event_PlayerIncap(Handle:event, const String:name[], bool:dontBroadcast)
@@ -344,8 +374,6 @@ public Action:Event_PlayerIncap(Handle:event, const String:name[], bool:dontBroa
     {
         CheckRushProtection();
     }
-
-    CheckWipe();
 }
 
 public Action:CheckRushProtection()
@@ -613,11 +641,13 @@ public Action:Event_DoorOpen(Handle:event, const String:name[], bool:dontBroadca
 }
 
 // this is called whenever someone gets incapped/ledgehung or dies -- if no one is left standing, it's a wipe (pre-score-set)
-public CheckWipe ()
+stock CheckWipe ()
 {
+    new tmpBonus = 0;
+    
     if ( !bDT3 || !bDT3Started )
     {
-        return;
+        return 0;
     }
 
     if ( !GetUprightSurvivors() )
@@ -649,14 +679,18 @@ public CheckWipe ()
             fBonusFactor = fTotalTime / (iSurv * DT3_EVENTTIME);
         }
 
-        new tmpBonus = RoundFloat( GetConVarFloat(hDT3EventBonus) * fBonusFactor );
+        tmpBonus = RoundFloat( GetConVarFloat(hDT3EventBonus) * fBonusFactor );
 
         PBONUS_AddRoundBonus( tmpBonus );
         iBonusShow[iTeamPlaying] += tmpBonus;
-        
+
         PrintToChatAll( "\x01[Church event] Event survival time bonus:\x04 %d \x01", tmpBonus );
         bDT3Started = false;
     }
+    
+    bCheckWipeDone = true;
+    
+    return tmpBonus;
 }
 
 /* --------------------------------------
@@ -844,7 +878,6 @@ public Event_PlayerKilled ( Handle:event, const String:name[], bool:dontBroadcas
         {
             // survivor died, remember what time it was
             fDT3SurvivorLasted[victim] = GetTickedTime() - fDT3StartTime;
-            CheckWipe();
         }
     }
 
@@ -901,7 +934,7 @@ public Action:Timer_CheckTank(Handle:timer, any:oldtankclient)
     bTankSpawned = false;
 }
 
-public CheckTankWipeBonus ()
+stock CheckTankWipeBonus ()
 {
     // find tank player.. do nothing if not found
     new tankClient = GetTankClient();
@@ -909,7 +942,7 @@ public CheckTankWipeBonus ()
     new tmpBonus = 0;
     
     // if it's dying, it counts as a full kill
-    if ( IsTankDying(tankClient))
+    if ( IsTankDying(tankClient) )
     {
         tmpBonus = GetConVarInt(hBonusTank);
 
@@ -934,10 +967,10 @@ public CheckTankWipeBonus ()
         new Float: factor = (fullHealth > 0.0) ? ((fullHealth - tankHealth) / fullHealth) : 0.0;
         tmpBonus = RoundFloat(factor * GetConVarFloat(hBonusTank));
 
-        if (tmpBonus < 0) { tmpBonus = 0; }
+        if ( tmpBonus < 0 ) { tmpBonus = 0; }
         //PrintToChatAll("[test] tank (%d %N) health %.0f - %.0f (factor %.2f) = bonus %d.", tankClient, tankClient, fullHealth, tankHealth, factor, tmpBonus);
 
-        if (tmpBonus)
+        if ( tmpBonus )
         {
             PBONUS_AddRoundBonus( tmpBonus );
             iBonusShow[iTeamPlaying] += tmpBonus;
@@ -950,7 +983,9 @@ public CheckTankWipeBonus ()
         }
     }
     bTankSpawned = false;
-    return true;
+    bCheckWipeTankDone = true;
+    
+    return tmpBonus;
 }
 
 GetTankClient ()
